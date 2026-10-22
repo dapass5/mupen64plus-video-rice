@@ -153,9 +153,6 @@ void CTextureManager::PurgeOldTextures()
     if (m_pCacheTxtrList == NULL)
         return;
     
-    if (g_bUseSetTextureMem)
-        return;
-
     static const uint32 dwFramesToKill = 5*30;          // 5 secs at 30 fps
     static const uint32 dwFramesToDelete = 30*30;       // 30 secs at 30 fps
     
@@ -494,28 +491,31 @@ TxtrCacheEntry * CTextureManager::CreateNewCacheEntry(uint32 dwAddr, uint32 dwWi
         unsigned int freeUpSize = (widthToCreate * heightToCreate * 4) + g_amountToFree;
 
         // Evict the least recently used textures until the new one fits.
-        // A texture unit can pin a few entries, so the attempt count is capped:
-        // otherwise a cache full of bound textures would spin here forever.
-        for (int attempt = 0;
-             attempt < 64 && (m_currentTextureMemUsage + freeUpSize) > g_maxTextureMemUsage
-                && m_pOldestTexture != NULL;
-             ++attempt)
+        // Only entries bound to a texture unit can stall this loop, and there
+        // are at most MAX_TEXTURES of them, so the *skips* are bounded instead
+        // of the evictions: capping total attempts would stop freeing too early
+        // when many small textures have to go to make room for a large one.
+        int skipped = 0;
+        while ((m_currentTextureMemUsage + freeUpSize) > g_maxTextureMemUsage
+               && m_pOldestTexture != NULL)
         {
             TxtrCacheEntry *victim = m_pOldestTexture;
 
             if (TCacheEntryIsLoaded(victim))
             {
-                // Still bound to a texture unit, so it cannot be freed yet.
-                // Move it to the young end so the next attempt picks another
-                // entry; if it is also the youngest there is nothing else left.
-                if (victim == m_pYoungestTexture)
+                // At most MAX_TEXTURES entries can be bound; past that we are
+                // cycling through the same ones.
+                if (victim == m_pYoungestTexture || ++skipped > MAX_TEXTURES)
                     break;
                 MakeTextureYoungest(victim);
             }
             else
             {
-                // RemoveTexture() keeps m_pOldestTexture/m_pYoungestTexture valid.
                 RemoveTexture(victim);
+                // Not found in the hash table, so nothing was unlinked: stop
+                // rather than spin on the same entry.
+                if (m_pOldestTexture == victim)
+                    break;
             }
 
         //printf("Freeing Texture\n");
